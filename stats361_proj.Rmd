@@ -1,0 +1,38 @@
+---
+title: "STATS 361 Final Project"
+author: "Brian Lui"
+date: "2023-06-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, cache = TRUE)
+set.seed(0)
+```
+
+## Getting started with pcalg
+
+```{r intro}
+library("pcalg")
+require(Rgraphviz)
+data("gmG")
+```
+
+```{r plot}
+suffStat <- list(C = cor(gmG8$x), n = nrow(gmG8$x))
+pc.gmG <- pc(suffStat, indepTest = gaussCItest,
+p = ncol(gmG8$x), alpha = 0.01)
+stopifnot(require(Rgraphviz))# needed for all our graph plots
+par(mfrow = c(1,2))
+plot(gmG8$g, main = "") ; plot(pc.gmG, main = "")
+```
+
+```{r census_data}
+require("reticulate")
+library(reticulate)
+pd <- import("pandas")
+pickle_data <- py_load_object("/Users/brianlui/Downloads/census_data_causal_discovery.p")
+```
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
