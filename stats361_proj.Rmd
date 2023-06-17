@@ -18,21 +18,294 @@ require(Rgraphviz)
 data("gmG")
 ```
 
-```{r plot}
-suffStat <- list(C = cor(gmG8$x), n = nrow(gmG8$x))
-pc.gmG <- pc(suffStat, indepTest = gaussCItest,
-p = ncol(gmG8$x), alpha = 0.01)
-stopifnot(require(Rgraphviz))# needed for all our graph plots
-par(mfrow = c(1,2))
-plot(gmG8$g, main = "") ; plot(pc.gmG, main = "")
+```{r data}
+census <- read.csv('data/census.csv')
+sachs <- read.table('data/sachs.data.txt', header=TRUE)
+drug <- DrugResistance
 ```
 
-```{r census_data}
-require("reticulate")
-library(reticulate)
-pd <- import("pandas")
-pickle_data <- py_load_object("/Users/brianlui/Downloads/census_data_causal_discovery.p")
+```{r analysis}
+census
 ```
 
+```{r process}
+sufficient_stat <- function(data) {
+  scaled_data <- scale(data.matrix(data))
+  corr <- cor(scaled_data)
+  return(list(C=corr, n=nrow(data)))
+}
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+run_pc <- function(data, name, plot=TRUE) {
+  sufficient_stat <- sufficient_stat(data)
+  fitted <- pc(sufficient_stat, indepTest=gaussCItest, labels=colnames(data), alpha=0.01)
+  if (plot) {
+    plot(fitted, main=sprintf("PC algorithm on %s", name))
+  }
+  return(fitted)
+}
+
+run_fci <- function(data, name, plot=TRUE) {
+  sufficient_stat <- sufficient_stat(data)
+  fitted <- fci(sufficient_stat, indepTest=gaussCItest, labels=colnames(data), alpha=0.01)
+  if (plot) {
+    plot(fitted, main=sprintf("FCI algorithm on %s", name))
+  }
+  return(fitted)
+}
+
+run_rfci <- function(data, name, plot=TRUE) {
+  sufficient_stat <- sufficient_stat(data)
+  fitted <- rfci(sufficient_stat, indepTest=gaussCItest, labels=colnames(data), alpha=0.01)
+  if (plot) {
+    plot(fitted, main=sprintf("RFCI algorithm on %s", name))
+  }
+  return(fitted)
+}
+
+run_ges <- function(data, name, plot=TRUE) {
+  score <- new("GaussL0penObsScore", scale(data.matrix(data)))
+  fitted <- ges(score)
+  if (plot) {
+    plot(fitted$essgraph, main=sprintf("GES algorithm on %s", name))
+  }
+  return(fitted)
+}
+
+run_lingam <- function(data, name, plot=TRUE) {
+  scaled_data <- scale(data.matrix(data))
+  fitted <- lingam(scaled_data)
+  adj_matrix <- (t(fitted$Bpruned) != 0.0) * 1
+  colnames(adj_matrix) <- colnames(data)
+  graph <- getGraph(adj_matrix)
+  if (plot) {
+    plot(graph, main=sprintf("LINGAM algorithm on %s", name))
+  }
+  return(fitted)
+}
+
+run <- function(data, name, algorithm, plot=TRUE) {
+  if (algorithm == 'pc') {
+    return(run_pc(data, name, plot))
+  } else if (algorithm == 'ges') {
+    return(run_ges(data, name, plot))
+  } else if (algorithm == 'lingam') {
+    return(run_lingam(data, name, plot))
+  }
+}
+```
+
+```{r edges}
+get_directed_edges_pc <- function(pc_fitted) {
+  starts <- c()
+  ends <- c()
+  edge_list <- pc_fitted@graph@edgeL
+  for (i in 1:length(edge_list)) {
+    for (j in edge_list[[i]]$edges) {
+      if (!(i %in% edge_list[[j]]$edges)) {
+        starts <- append(starts, i)
+        ends <- append(ends, j)
+      }
+    }
+  }
+  return(data.frame(start=starts, end=ends))
+}
+
+get_directed_edges_ges <- function(ges_fitted) {
+  starts <- c()
+  ends <- c()
+  edge_list <- ges_fitted$essgraph$.in.edges
+  for (i in 1:length(edge_list)) {
+    for (j in edge_list[[i]]) {
+      if (!(i %in% edge_list[[j]])) {
+        starts <- append(starts, i)
+        ends <- append(ends, j)
+      }
+    }
+  }
+  return(data.frame(start=starts, end=ends))
+}
+
+get_directed_edges_lingam <- function(lingam_fitted) {
+  starts <- c()
+  ends <- c()
+  adj_matrix <- (t(lingam_fitted$Bpruned) != 0.0) * 1
+  for (i in 1:nrow(adj_matrix)) {
+    for (j in 1:ncol(adj_matrix)) {
+      if ((adj_matrix[i, j] == 1) & (adj_matrix[j, i] != 1)) {
+        starts <- append(starts, i)
+        ends <- append(ends, j)
+      }
+    }
+  }
+  return(data.frame(start=starts, end=ends))
+}
+
+get_directed_edges <- function(fitted, algorithm) {
+  if (algorithm == 'pc') {
+    return(get_directed_edges_pc(fitted))
+  } else if (algorithm == 'ges') {
+    return(get_directed_edges_ges(fitted))
+  } else if (algorithm == 'lingam') {
+    return(get_directed_edges_lingam(fitted))
+  }
+}
+```
+
+```{r confound}
+confound <- function(data, predicted_edges, gamma=1.0) {
+  X <- scale(data.matrix(data))
+  for (row in 1:nrow(predicted_edges)) {
+    start <- predicted_edges[row, 1]
+    end <- predicted_edges[row, 2]
+    noise <- runif(nrow(X)) * gamma
+    X[, start] <- X[, start] + noise
+    X[, end] <- X[, end] + noise
+  }
+  return(scale(X))
+}
+
+get_directed_edges_confounded <- function(
+    data, edges, gamma, algorithm, plot=TRUE) {
+  confounded <- confound(data, edges, gamma)
+  if (plot) {
+    dev.off()
+  }
+  fitted_confounded <- run(confounded, name, algorithm, plot)
+  edges_confounded <- get_directed_edges(fitted_confounded, algorithm)
+  return(edges_confounded)
+}
+```
+
+```{r ratios}
+get_ratios <- function(old_edges, new_edges) {
+  n_old_edges <- nrow(old_edges)
+  n_new_edges <- nrow(new_edges)
+  n_edges_still_remaining <- sum(do.call(paste0, old_edges) %in% do.call(paste0, new_edges))
+  
+  old_edges_flipped <- data.frame(start=old_edges$end, end=old_edges$start)
+  n_old_edges_reversed <- sum(do.call(paste0, old_edges_flipped) %in% do.call(paste0, new_edges))
+
+  reversal_ratio <- n_old_edges_reversed / n_old_edges
+  retention_ratio <- n_edges_still_remaining / n_old_edges
+  confusion_ratio <- (n_new_edges - n_edges_still_remaining) / n_old_edges
+  
+  return(list(
+    retention=retention_ratio,
+    confusion=confusion_ratio,
+    reversal=reversal_ratio
+  ))
+}
+
+get_ratios_for_gammas <- function(
+    data, name, gammas, algorithm, reps=1, plot=TRUE) {
+  fitted <- run(data, name, algorithm, plot)
+  edges <- get_directed_edges(fitted, algorithm)
+  
+  retention <- c()
+  confusion <- c()
+  reversal <- c()
+  retention_sd <- c()
+  confusion_sd <- c()
+  reversal_sd <- c()
+  
+  for (gamma in gammas) {
+    retentions <- c()
+    confusions <- c()
+    reversals <- c()
+    for (rep in 1:reps) {
+      new_edges <- get_directed_edges_confounded(
+        data, edges, gamma, algorithm, plot)
+      ratios <- get_ratios(edges, new_edges)
+      retentions <- append(retentions, ratios$retention)
+      confusions <- append(confusions, ratios$confusion)
+      reversals <- append(reversals, ratios$reversal)
+    }
+    retention <- append(retention, mean(retentions))
+    confusion <- append(confusion, mean(confusions))
+    reversal <- append(reversal, mean(reversals))
+    retention_sd <- append(retention_sd, sd(retentions))
+    confusion_sd <- append(confusion_sd, sd(confusions))
+    reversal_sd <- append(reversal_sd, sd(reversals))
+  }
+  
+  return(data.frame(
+    name=rep(name, length(gammas)),
+    algorithm=rep(algorithm, length(gammas)),
+    gamma=gammas,
+    retention=retention,
+    confusion=confusion,
+    reversal=reversal,
+    retention_sd=retention_sd,
+    confusion_sd=confusion_sd,
+    reversal_sd=reversal_sd))
+}
+
+get_ratios_for_all_expts <- function(
+    datasets, names, gammas, algorithms, reps=1, plot=TRUE) {
+  col_names <- c(
+    'name', 'algorithm', 'gamma',
+    'retention', 'confusion', 'reversal',
+    'retention_sd', 'confusion_sd', 'reversal_sd')
+  result <- data.frame(
+    matrix(ncol=9,nrow=0, dimnames=list(NULL, col_names)))
+  for (i in 1:length(datasets)) {
+    dataset <- datasets[[i]]
+    name <- names[i]
+    for (algorithm in algorithms) {
+      result <- rbind(result, get_ratios_for_gammas(
+        dataset, name, gammas, algorithm, reps, plot
+      ))
+    }
+  }
+  return(result)
+}
+```
+
+```{r expt}
+ratios_trial <- get_ratios_for_gammas(
+  data=census,
+  name='census data',
+  gammas=c(0.1, 1, 10, 100, 1000, 10000, 100000, 1000000),
+  algorithm='pc',
+  reps=1,
+  plot=TRUE
+)
+```
+
+```{r all_expts}
+ratios <- get_ratios_for_all_expts(
+  datasets=list(census, sachs, drug),
+  names=c('census', 'protein', 'drug'),
+  gammas=c(0.1, 1, 10, 100, 1000, 10000, 100000, 1000000),
+  algorithms=c('pc', 'ges', 'lingam'),
+  reps=20,
+  plot=FALSE
+)
+```
+
+```{r viz}
+head(ratios)
+library(ggplot2)
+library(latex2exp)
+
+data <- data.frame(ratios)
+data$gamma <- log10(ratios$gamma)
+data$name <- factor(ratios$name, levels=c('census', 'protein', 'drug'))
+data$algorithm <- factor(toupper(ratios$algorithm), levels=c('PC', 'GES', 'LINGAM'))
+data$reversal <- pmin(data$reversal, data$confusion)
+
+display <- ggplot(data, aes(x=gamma, y=confusion)) +
+  geom_line(aes(gamma, retention), alpha=1.0, color='green') +
+  geom_line(aes(gamma, confusion), alpha=1.0, color='red') + 
+  geom_line(aes(gamma, reversal), alpha=1.0, color='blue') +
+  geom_ribbon(aes(ymin=retention-retention_sd, ymax=retention+retention_sd), alpha=0.3, fill='green') +
+  geom_ribbon(aes(ymin=confusion-confusion_sd, ymax=confusion+confusion_sd), alpha=0.3, fill='red') +
+  geom_ribbon(aes(ymin=reversal-reversal_sd, ymax=reversal+reversal_sd), alpha=0.3, fill='blue') +
+  facet_grid(rows=vars(name), cols=vars(algorithm)) +
+  xlab(TeX(r"(Confounding strength $\gamma$ in log scale in base 10)")) + 
+  ylab('Ratios') +
+  labs(title='Retention, confusion, and reversal ratios for algorithm-dataset pairs')
+
+display
+# ggsave('/Users/brianlui/Downloads/compare.pdf')
+```
